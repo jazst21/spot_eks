@@ -1,0 +1,160 @@
+# Task tracking for spot_aws
+# Status: done | in-progress | planned | blocked
+
+- id: 1
+  task: Simulate Spot interruption without AWS FIS
+  status: done
+  files: [script/simulate_spot_interruption.py]
+  design: |
+    Python script that mimics EC2 Spot interruption by sending EventBridge-format
+    messages directly to the NTH/Karpenter SQS queue (can't use events:PutEvents
+    with source "aws.ec2" — reserved by AWS). NTH parses the same JSON format
+    regardless of whether it came from EventBridge or was injected directly.
+
+    Flow: list nodes → pick target → validate via EC2 API → send to SQS →
+    NTH cordons+drains → script polls drain → terminates instance → watches recovery
+
+  supported_events: |
+    1. EC2 Spot Instance Interruption Warning (--event interruption, default)
+       - Sends to SQS, NTH cordons+drains, script terminates after drain
+    2. EC2 Instance Rebalance Recommendation (--event rebalance)
+       - Sends to SQS, observes NTH reaction, does NOT auto-terminate
+
+  cli: |
+    ./simulate_spot_interruption.py                    # interactive, Spot nodes
+    ./simulate_spot_interruption.py --all-nodes        # show all MNGs
+    ./simulate_spot_interruption.py --event rebalance  # advisory event
+    ./simulate_spot_interruption.py --dry-run          # send event only
+    ./simulate_spot_interruption.py --queue-url <url>  # custom SQS queue
+
+  learned: |
+    - events:PutEvents rejects source "aws.ec2" (NotAuthorizedForSourceException)
+    - Workaround: send EventBridge-format JSON directly to SQS queue
+    - NTH doesn't validate message origin, only parses the JSON body
+    - Region must be resolved from node AZ labels, not boto3 default
+
+- id: 2
+  task: Separate system MNG from app On-Demand MNG
+  status: done
+  files: [asg/tf/eks.tf, asg/tf/cluster-autoscaler.tf, asg/tf/nth.tf, asg/k8s/kubecost-values.yaml]
+  design: |
+    3-MNG pattern:
+      system:   ON_DEMAND, taint workload-type=system:NoSchedule (CA, NTH, kubecost)
+      workload: ON_DEMAND, no taint (productpage)
+      workload: SPOT, taint spot=true:NoSchedule (details, ratings, reviews)
+
+  learned: |
+    - CA Helm chart SA name is "cluster-autoscaler-aws-cluster-autoscaler" not "cluster-autoscaler"
+      → IRSA trust policy must match the actual SA name
+    - NTH Helm chart uses "nodeSelector" not "nodeSelector.workload-type" for set values
+      → patched via kubectl as workaround
+
+- id: 3
+  task: Document graceful shutdown best practices for Spot workloads
+  status: done
+  files: [best_practice.md, best_practice_config.md]
+  scope: |
+    Application code responsibility — handle SIGTERM, drain connections, fail readiness probe.
+    Infra safety nets: preStop sleep (routing propagation delay), terminationGracePeriodSeconds.
+    Code examples for Python, Node.js, Java.
+  references:
+    - https://docs.aws.amazon.com/prescriptive-guidance/latest/ha-resiliency-amazon-eks-apps/lifecycle-hooks.html
+    - https://docs.aws.amazon.com/eks/latest/best-practices/load-balancing.html#_gracefully_shutdown_applications
+
+- id: 4
+  task: Build comparison app — Spot best practices vs no best practices
+  status: done
+  files:
+    - asg/k8s/app_good/app.py
+    - asg/k8s/app_good/Dockerfile
+    - asg/k8s/app_good/deployment.yaml
+    - asg/k8s/app_good/service.yaml
+    - asg/k8s/app_bad/deployment.yaml
+    - asg/k8s/app_bad/service.yaml
+    - asg/k8s/locust.yaml
+
+  app: |
+    Simple Python FastAPI app (~15 lines):
+      - GET /        → returns {"pod": name, "node": node_name, "az": az, "status": "ok"}
+      - GET /health  → readiness probe (returns 503 after SIGTERM)
+      - GET /slow    → simulates work (sleep 1-2s) for realistic load
+      - SIGTERM handler: stops accepting, drains in-flight, exits 0
+    
+    Single image, pushed to ECR. Both app_good and app_bad use the same image.
+    Deployed in bookinfo namespace → gets Istio sidecar injection automatically.
+
+  app_good (asg/k8s/app_good/): |
+    All Spot best practices:
+      - replicas: 3
+      - Spot toleration + preferredDuringScheduling weight 90
+      - PDB: minAvailable 1, matchLabels app+version
+      - strategy: RollingUpdate, maxUnavailable 1
+      - topologySpreadConstraints: zone (DoNotSchedule) + hostname (ScheduleAnyway)
+      - HPA: cpu 70%, min 2, max 10
+      - preStop: sleep 10
+      - terminationGracePeriodSeconds: 60
+      - resource requests: cpu 50m, memory 64Mi
+      - readinessProbe + livenessProbe on /health
+      - Service (ClusterIP) for Istio mesh routing
+
+  app_bad (asg/k8s/app_bad/): |
+    Zero best practices — common anti-patterns:
+      - replicas: 1
+      - No toleration, no affinity (lands wherever scheduler puts it)
+      - No PDB
+      - No topology spread
+      - No HPA
+      - No preStop, no terminationGracePeriodSeconds
+      - No resource requests
+      - No probes
+      - Service (ClusterIP) for Istio mesh routing
+
+  istio: |
+    Both deploy in bookinfo namespace (istio-injection: enabled).
+    Istio sidecars injected automatically → traffic visible in Kiali.
+    Kiali will show:
+      - locust → myapp-good (green, healthy during interruption)
+      - locust → myapp-bad (red, errors during interruption)
+
+  locust_update: |
+    Single locust, 3 UserClasses with separate hosts. Locust UI shows user count
+    sliders per class and separate stats rows. No host conflict.
+
+      class BookinfoUser(HttpUser):
+          host = "http://productpage:9080"
+          weight = 5
+          @task def page(self): self.client.get("/productpage", allow_redirects=False)
+          @task def reviews(self): self.client.get("/api/v1/products/0/reviews", allow_redirects=False)
+
+      class GoodUser(HttpUser):
+          host = "http://myapp-good:8080"
+          weight = 3
+          @task def root(self): self.client.get("/")
+          @task def slow(self): self.client.get("/slow")
+
+      class BadUser(HttpUser):
+          host = "http://myapp-bad:8080"
+          weight = 3
+          @task def root(self): self.client.get("/")
+          @task def slow(self): self.client.get("/slow")
+
+    During Spot interruption, compare GoodUser vs BadUser error rates in stats table.
+
+  ecr: |
+    aws ecr create-repository --repository-name myapp --region ap-southeast-3
+    docker build -t myapp asg/k8s/app_good/
+    docker tag myapp <account>.dkr.ecr.ap-southeast-3.amazonaws.com/myapp:latest
+    docker push <account>.dkr.ecr.ap-southeast-3.amazonaws.com/myapp:latest
+
+  test_sequence: |
+    1. Build + push image to ECR
+    2. Deploy both: kubectl apply -f asg/k8s/app_good/ -f asg/k8s/app_bad/
+    3. Verify Istio sidecars: kubectl get pods -n bookinfo (2/2 containers)
+    4. Update locust ConfigMap, restart locust
+    5. Start load test in locust UI
+    6. Open Kiali — verify traffic graph shows both apps
+    7. Run: ./simulate_spot_interruption.py (pick Spot node with both apps)
+    8. Watch locust:
+       - /good: brief blip (<10s), pods reschedule, PDB prevents full outage
+       - /bad: 100% errors for 60-90s until replacement node ready
+    9. Screenshot comparison for documentation

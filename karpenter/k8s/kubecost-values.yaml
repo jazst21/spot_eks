@@ -1,0 +1,43 @@
+# Kubecost Helm values for EKS Spot cost visibility (Karpenter)
+
+global:
+  grafana:
+    enabled: false
+    proxy: false
+
+# Run on system On-Demand nodes
+tolerations: []
+nodeSelector:
+  karpenter.sh/capacity-type: on-demand
+
+savings:
+  spotChecklist:
+    enabled: true
+
+kubecostProductConfigs:
+  clusterName: "eks-spot-karpenter"
+  spotLabel: "karpenter.sh/capacity-type"
+  spotLabelValue: "spot"
+  gpuLabel: ""
+  gpuLabelValue: ""
+
+costAnalyzer:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+prometheus:
+  server:
+    tolerations: []
+    nodeSelector:
+      karpenter.sh/capacity-type: on-demand
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+    retention: 15d
