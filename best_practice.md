@@ -16,8 +16,8 @@
   - Automatic draining of Spot nodes before interruption.
 - Set `CapacityRebalance: true` on the underlying ASG so the drain process runs correctly on Spot interruption or rebalance notifications.
 - Provide multiple instance types in the node group config (same vCPU/memory family) to maximize availability.
-- Separate node groups by capacity type — dedicated On-Demand groups for critical workloads, Spot groups for fault-tolerant workloads.
-- Use a dedicated **system node group** (On-Demand, tainted) for cluster infrastructure: NTH, Cluster Autoscaler, CoreDNS, EBS CSI, metrics-server, Istio control plane, observability tools. Taint with `workload-type=system:NoSchedule` to prevent app workloads from consuming system node capacity.
+- Separate node groups by capacity type — use a **3-group pattern**: system (infra), on-demand (critical apps), spot (fault-tolerant).
+- Use a dedicated **system node group** (On-Demand, tainted) for cluster infrastructure: NTH, Cluster Autoscaler, CoreDNS, EBS CSI, metrics-server, Istio control plane, kube-ops-view, Kubecost. Taint with `workload-type=system:NoSchedule` to prevent app workloads from consuming system node capacity.
 - PDBs are NOT respected during `AZRebalance` events or when reducing desired node count — add lifecycle hooks to the ASG to extend drain time if needed.
 
 ### Cluster Autoscaler Priority Expander
@@ -25,20 +25,7 @@
 When using Cluster Autoscaler (not Karpenter), the [priority expander](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/expander/priority/readme.md) controls which node group gets scaled up first.
 
 - Configure via `cluster-autoscaler-priority-expander` ConfigMap in `kube-system`. Changes are picked up live — no restart needed.
-- Assign higher priority values to Spot node groups so they are preferred over On-Demand for scale-up:
-  ```yaml
-  apiVersion: v1
-  kind: ConfigMap
-  metadata:
-    name: cluster-autoscaler-priority-expander
-    namespace: kube-system
-  data:
-    priorities: |-
-      10:
-        - .*on-demand.*
-      50:
-        - .*spot.*
-  ```
+- Assign higher priority values to Spot node groups so they are preferred over On-Demand for scale-up.
 - Can be integrated with external engines (e.g., Spot pricing optimizers) that update the ConfigMap dynamically to reprioritize node groups based on current interruption rates or pricing.
 - Add a catch-all regex `.*` at the lowest priority to ensure all node groups remain eligible for scaling.
 - Enable with `--expander=priority` flag on the Cluster Autoscaler deployment.
@@ -76,6 +63,17 @@ Use NTH when running **self-managed node groups** or ASG-based setups where EKS 
 
 ## Layer 4: Kubernetes (Pod / Workload Level)
 
+### Spot Placement Strategies
+
+Each microservice demonstrates a different placement strategy:
+
+| Service | Strategy | Capacity Mix | Use Case |
+|---|---|---|---|
+| **productpage** | Full On-Demand | ON_DEMAND only | User-facing frontend — can't tolerate interruption |
+| **details** | Mixed (prefer Spot) | ON_DEMAND + SPOT | Resilient to interruption, spreads across both capacity types |
+| **ratings** | Full Spot (required) | SPOT only | Fully Spot-committed, cheapest, most exposed to interruption |
+| **reviews** v1/v2/v3 | Prefer Spot (soft) | SPOT or ON_DEMAND | Soft preference — falls back to On-Demand if Spot unavailable |
+
 ### Spot Readiness Assessment (Kubecost)
 
 Before moving workloads to Spot, use [Kubecost Spot Checklist](https://www.ibm.com/docs/en/kubecost/self-hosted/2.x?topic=savings-spot-checklist) to evaluate which workloads are candidates. It automatically checks:
@@ -87,52 +85,33 @@ Before moving workloads to Spot, use [Kubecost Spot Checklist](https://www.ibm.c
 - **Rolling update strategy** — Evaluates max unavailable vs replica count for Deployments.
 - **Manual overrides** — Annotate with `spot.kubecost.com/spot-ready=true` to override checks.
 
-Additional guidance from Kubecost:
-- Use **smaller Spot node sizes** to minimize blast radius when a single node is reclaimed (e.g., 5x 4-CPU nodes vs 1x 20-CPU node).
-- Kubecost also provides a **Spot Commander** that recommends a cluster configuration of Spot vs On-Demand nodes based on the checklist results.
+### Workload Configuration
 
 - Design workloads to be **fault-tolerant and stateless**. Save state to persistent storage (EBS, S3, EFS) — instance store data is lost on interruption.
 - Break work into small, resumable tasks so interrupted work can be retried cheaply.
-- Use **taints and tolerations** to isolate Spot nodes:
-  ```yaml
-  # Taint on Spot nodes
-  taints:
-    - key: spot
-      value: "true"
-      effect: NoSchedule
-  ```
-  ```yaml
-  # Toleration on Spot-friendly pods
-  tolerations:
-    - key: spot
-      operator: Equal
-      value: "true"
-      effect: NoSchedule
-  ```
+- Use **taints and tolerations** to isolate Spot nodes (`spot=true:NoSchedule`).
 - Use **node affinity** or `nodeSelector` with label `eks.amazonaws.com/capacityType: SPOT` to prefer or require Spot placement.
-- Define **Pod Disruption Budgets (PDBs)** for all services on Spot nodes:
-  ```yaml
-  apiVersion: policy/v1
-  kind: PodDisruptionBudget
-  metadata:
-    name: my-app-pdb
-  spec:
-    minAvailable: 1
-    selector:
-      matchLabels:
-        app: my-app
-  ```
-- Use **topology spread constraints** so a single Spot interruption doesn't take down all replicas:
-  ```yaml
-  topologySpreadConstraints:
-    - maxSkew: 1
-      topologyKey: topology.kubernetes.io/zone
-      whenUnsatisfiable: DoNotSchedule
-      labelSelector:
-        matchLabels:
-          app: my-app
-  ```
+- Define **Pod Disruption Budgets (PDBs)** for all services on Spot nodes (`minAvailable: 1`).
+- Use **topology spread constraints** so a single Spot interruption doesn't take down all replicas.
 - Set accurate **resource requests** on all pods for efficient bin-packing and autoscaler decisions.
+- Set explicit `maxUnavailable: 1` in rolling update strategy (default 25% fails Kubecost's check with 2 replicas).
+
+### Topology Spread Constraints
+
+Each service uses a different combination based on its placement strategy:
+
+| Service | Zone | Host | Capacity Type | Instance Type |
+|---|---|---|---|---|
+| **productpage** | ✅ `DoNotSchedule` | ✅ `ScheduleAnyway` | — | — |
+| **details** | ✅ `DoNotSchedule` | ✅ `ScheduleAnyway` | ✅ `DoNotSchedule` | — |
+| **ratings** | ✅ `DoNotSchedule` | ✅ `DoNotSchedule` | — | ✅ `ScheduleAnyway` |
+| **reviews** v1/v2/v3 | ✅ `DoNotSchedule` | ✅ `ScheduleAnyway` | — | — |
+
+What each `topologyKey` protects against:
+- `topology.kubernetes.io/zone` — AZ failure or AZ-wide Spot capacity drain
+- `kubernetes.io/hostname` — single node interruption
+- `eks.amazonaws.com/capacityType` — ensures replicas on both Spot and On-Demand (details uses this for mixed strategy)
+- `node.kubernetes.io/instance-type` — single instance-type Spot pool exhaustion (ratings uses this since it's 100% Spot)
 
 ### Graceful Shutdown for Spot Workloads
 
@@ -144,37 +123,10 @@ Spot nodes get a 2-minute warning before termination. Your app must shut down cl
 - Close DB connections, flush buffers, save state
 - Exit with code 0
 
-**Language examples:**
-
-Python:
-```python
-import signal, sys
-def shutdown(signum, frame):
-    server.stop(grace=10)
-    db.close()
-    sys.exit(0)
-signal.signal(signal.SIGTERM, shutdown)
-```
-
-Node.js:
-```javascript
-process.on('SIGTERM', () => {
-  server.close(() => { process.exit(0); });
-});
-```
-
-Java:
-```java
-Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-    server.shutdown();
-    server.awaitTermination(10, TimeUnit.SECONDS);
-}));
-```
-
 **Readiness probe should fail on SIGTERM** — once the app starts shutting down, return 503 from the readiness endpoint so the load balancer / Envoy stops sending new traffic.
 
 **Infra safety nets (K8s manifest level):**
-- `preStop` hook with `sleep 5-10s` — delays SIGTERM so iptables/Envoy have time to remove the pod from routing. Without this, new requests still arrive at a terminating pod.
+- `preStop` hook with `sleep 5-10s` — delays SIGTERM so iptables/Envoy have time to remove the pod from routing.
 - `terminationGracePeriodSeconds: 60` — gives enough time for preStop + app cleanup. Must be less than the 2-min Spot warning.
 - PDB `minAvailable` — ensures not all replicas drain simultaneously.
 
@@ -194,14 +146,12 @@ T+2:00  EC2 terminates instance
 
 ### kube-ops-view
 
-Use [kube-ops-view](https://codeberg.org/hjacobs/kube-ops-view) to get a real-time visual overview of nodes and pod placement across the cluster. During Spot interruption testing (e.g., FIS experiments), it shows:
+Use [kube-ops-view](https://codeberg.org/hjacobs/kube-ops-view) to get a real-time visual overview of nodes and pod placement across the cluster. During Spot interruption testing, it shows:
 
 - Which nodes are in each AZ and their Ready/NotReady status
 - Pod distribution across nodes — verify topology spread constraints are working
 - Pod lifecycle animations — watch pods drain from a cordoned Spot node and reschedule onto surviving nodes
 - CPU/memory usage per node and pod via colored fill indicators
-
-This makes it easy to visually confirm that PDBs, topology spread, and NTH drain behavior work as expected when a Spot node is reclaimed.
 
 Install:
 ```bash
@@ -255,14 +205,15 @@ python3 script/simulate_spot_interruption.py --check-spread
 ## References
 
 - [EKS Managed Node Groups](https://docs.aws.amazon.com/eks/latest/userguide/managed-node-groups.html)
+- [EKS Best Practices — Cluster Autoscaler](https://docs.aws.amazon.com/eks/latest/best-practices/cas.html)
 - [Karpenter Best Practices](https://docs.aws.amazon.com/eks/latest/best-practices/karpenter.html)
 - [EC2 Spot Allocation Strategies](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-fleet-allocation-strategy.html)
 - [Prepare for Spot Interruptions](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/prepare-for-interruptions.html)
 - [AWS Fault Injection Service](https://docs.aws.amazon.com/fis/latest/userguide/what-is.html)
-- [EKS Spot Instances with eksctl](https://docs.aws.amazon.com/eks/latest/eksctl/spot-instances.html)
 - [AWS Node Termination Handler](https://github.com/aws/aws-node-termination-handler)
 - [Cluster Autoscaler Priority Expander](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/expander/priority/readme.md)
 - [Kubecost Spot Checklist](https://www.ibm.com/docs/en/kubecost/self-hosted/2.x?topic=savings-spot-checklist)
 - [Configure Container Lifecycle Hooks (AWS Prescriptive Guidance)](https://docs.aws.amazon.com/prescriptive-guidance/latest/ha-resiliency-amazon-eks-apps/lifecycle-hooks.html)
 - [Gracefully Shutdown Applications (EKS Best Practices)](https://docs.aws.amazon.com/eks/latest/best-practices/load-balancing.html#_gracefully_shutdown_applications)
+- [ec2-instance-selector](https://github.com/aws/amazon-ec2-instance-selector)
 - [kube-ops-view](https://codeberg.org/hjacobs/kube-ops-view)
