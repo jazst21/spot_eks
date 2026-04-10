@@ -1,0 +1,64 @@
+# Kubecost Helm values for EKS Spot cost visibility
+# Ref: https://docs.aws.amazon.com/eks/latest/userguide/cost-monitoring-kubecost.html
+
+global:
+  # Use AWS-optimized Kubecost bundle pricing
+  clusterId: "eks-spot-asg"
+  grafana:
+    enabled: false
+    proxy: false
+
+# Run Kubecost on On-Demand nodes (not Spot) — it's a critical observability tool
+tolerations:
+  - key: workload-type
+    value: "system"
+    effect: NoSchedule
+nodeSelector:
+  workload-type: system
+
+# Enable Spot savings analysis
+savings:
+  spotChecklist:
+    enabled: true
+
+kubecostProductConfigs:
+  clusterName: "eks-spot-asg"
+  # Spot pricing feed for accurate cost attribution
+  spotLabel: "eks.amazonaws.com/capacityType"
+  spotLabelValue: "SPOT"
+  # GPU spot pricing (if applicable)
+  gpuLabel: ""
+  gpuLabelValue: ""
+
+# Resource requests for bin-packing (Layer 4 best practice)
+costAnalyzer:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+prometheus:
+  server:
+    tolerations:
+      - key: workload-type
+        value: "system"
+        effect: NoSchedule
+    nodeSelector:
+      workload-type: system
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+    retention: 15d
+
+forecasting:
+  tolerations:
+    - key: workload-type
+      value: "system"
+      effect: NoSchedule
+  nodeSelector:
+    workload-type: system

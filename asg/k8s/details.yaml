@@ -1,0 +1,103 @@
+# details - Ruby service, book information
+# Strategy: MIXED (tolerates Spot, prefers Spot, but can fall back to On-Demand)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: details
+  namespace: bookinfo
+  labels:
+    app: details
+spec:
+  ports:
+    - port: 9080
+      name: http
+  selector:
+    app: details
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: details-v1
+  namespace: bookinfo
+  labels:
+    app: details
+    version: v1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: details
+      version: v1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: details
+        version: v1
+    spec:
+      tolerations:
+        - key: spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 70
+              preference:
+                matchExpressions:
+                  - key: eks.amazonaws.com/capacityType
+                    operator: In
+                    values: ["SPOT"]
+            - weight: 30
+              preference:
+                matchExpressions:
+                  - key: eks.amazonaws.com/capacityType
+                    operator: In
+                    values: ["ON_DEMAND"]
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: eks.amazonaws.com/capacityType
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: details
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: details
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: details
+      containers:
+        - name: details
+          image: docker.io/istio/examples-bookinfo-details-v1:1.20.2
+          ports:
+            - containerPort: 9080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: details-pdb
+  namespace: bookinfo
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: details
+      version: v1

@@ -1,0 +1,14 @@
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  '''istio-.*''',
+  '''test/fixtures/.*''',
+  '''docs/examples/.*''',
+]
+regexes = [
+  '''sk_test_[A-Za-z0-9]+''',
+  '''EXAMPLE_.*''',
+  '''PLACEHOLDER_.*''',
+]

@@ -1,0 +1,19 @@
+Readiness,Controller,Controller Type,Replicas,Local Storage,Controller PDB,Rolling Update,NS Annotation Override,Controller Annotation Override
+Spot Ready,bookinfo:details-v1,✅,✅,✅,✅ 1/2,✅ 1/2,—,—
+Not Ready,bookinfo:locust,✅,❌,✅,✅ 0/1,❌ 1/1,—,—
+Spot Ready,bookinfo:productpage-v1,✅,✅,✅,✅ 1/2,✅ 1/2,—,—
+Spot Ready,bookinfo:ratings-v1,✅,✅,✅,✅ 1/2,✅ 1/2,—,—
+Spot Ready,bookinfo:reviews-v1,✅,✅,✅,✅ 1/2,✅ 1/2,—,—
+Spot Ready,bookinfo:reviews-v2,✅,✅,✅,✅ 1/2,✅ 1/2,—,—
+Spot Ready,bookinfo:reviews-v3,✅,✅,✅,✅ 1/2,✅ 1/2,—,—
+Not Ready,istio-system:istiod,✅,❌,❌,❌ 1/1,❌ 1/1,—,—
+Not Ready,istio-system:kiali,✅,❌,✅,✅ 0/1,✅ 0/1,—,—
+Not Ready,istio-system:prometheus,✅,❌,❌,✅ 0/1,❌ Recreate (full downtime),—,—
+Not Ready,kube-system:aws-node-termination-handler,✅,❌,✅,✅ 0/1,❌ 1/1,—,—
+Not Ready,kube-system:cluster-autoscaler-aws-cluster-autoscaler,✅,❌,✅,✅ 0/1,❌ 1/1,—,—
+Spot Ready,kube-system:coredns,✅,✅,✅,✅ 1/2,✅ 1/2,—,—
+Not Ready,kube-system:ebs-csi-controller,✅,✅,❌,✅ 1/2,✅ 1/2,—,—
+Not Ready,kube-system:metrics-server,✅,✅,❌,✅ 1/2,✅ 1/2,—,—
+Not Ready,kubecost:kubecost-cost-analyzer,✅,❌,❌,✅ 0/1,✅ 0/1,—,—
+Not Ready,kubecost:kubecost-forecasting,✅,❌,❌,✅ 0/1,❌ 1/1,—,—
+Not Ready,kubecost:kubecost-prometheus-server,✅,❌,✅,✅ 0/1,❌ Recreate (full downtime),—,—

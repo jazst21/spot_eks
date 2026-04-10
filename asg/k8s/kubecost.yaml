@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubecost
+---
+# Kubecost install via Helm (run from CLI):
+#
+#   helm install kubecost \
+#     oci://public.ecr.aws/kubecost/kubecost/cost-analyzer \
+#     --namespace kubecost \
+#     -f asg/k8s/kubecost-values.yaml
+#
+# Or use the EKS add-on instead:
+#
+#   aws eks create-addon \
+#     --cluster-name <cluster-name> \
+#     --addon-name kubecost_kubecost \
+#     --region <region>
+#
+# Access dashboard:
+#   kubectl port-forward -n kubecost svc/kubecost-cost-analyzer 9090:9090
+#   Open http://localhost:9090
+#
+# Spot Checklist:
+#   UI > Settings > Spot Instances > Spot Checklist

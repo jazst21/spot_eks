@@ -1,0 +1,47 @@
+# Shared app code — used by both app_good and app_bad
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: myapp-code
+  namespace: bookinfo
+data:
+  app.py: |
+    import os, signal, sys, time, random
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import json, threading
+
+    shutting_down = False
+
+    def shutdown(signum, frame):
+        global shutting_down
+        shutting_down = True
+        print("SIGTERM received, draining...", flush=True)
+        threading.Timer(5, lambda: sys.exit(0)).start()
+
+    signal.signal(signal.SIGTERM, shutdown)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            if self.path == "/health":
+                code = 503 if shutting_down else 200
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "draining" if shutting_down else "ok"}).encode())
+            elif self.path == "/slow":
+                time.sleep(random.uniform(1, 2))
+                self._respond()
+            else:
+                self._respond()
+        def _respond(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "pod": os.environ.get("HOSTNAME", "?"),
+                "node": os.environ.get("NODE_NAME", "?"),
+                "az": os.environ.get("AZ", "?"),
+                "status": "draining" if shutting_down else "ok",
+            }).encode())
+
+    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()

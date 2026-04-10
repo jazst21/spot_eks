@@ -1,0 +1,98 @@
+# ratings - Node.js service, book ranking info
+# Strategy: FULL SPOT with mixed instance type support
+#   - Required on Spot nodes
+#   - Spread across AZs and hosts to survive interruptions across instance types
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratings
+  namespace: bookinfo
+  labels:
+    app: ratings
+spec:
+  ports:
+    - port: 9080
+      name: http
+  selector:
+    app: ratings
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratings-v1
+  namespace: bookinfo
+  labels:
+    app: ratings
+    version: v1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ratings
+      version: v1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: ratings
+        version: v1
+    spec:
+      tolerations:
+        - key: spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: eks.amazonaws.com/capacityType
+                    operator: In
+                    values: ["SPOT"]
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: ratings
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: ratings
+        - maxSkew: 1
+          topologyKey: node.kubernetes.io/instance-type
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: ratings
+      containers:
+        - name: ratings
+          image: docker.io/istio/examples-bookinfo-ratings-v1:1.20.2
+          ports:
+            - containerPort: 9080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ratings-pdb
+  namespace: bookinfo
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ratings
+      version: v1
