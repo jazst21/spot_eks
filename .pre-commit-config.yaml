@@ -7,5 +7,4 @@ repos:
     rev: v3.88.0
     hooks:
       - id: trufflehog
-        args: ["git", "file://.", "--since-commit", "HEAD", "--only-verified", "--fail"]
         stages: [pre-push]
